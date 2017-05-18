@@ -26,6 +26,7 @@ Gem::Specification.new do |s|
   s.add_dependency("tilt", ["~> 1.4.1", "< 2.0"])
   s.add_dependency("erubis")
   s.add_dependency("hooks", ["~> 0.3"])
+  s.add_dependency('parallel')
 
   # Builder
   s.add_dependency("capybara", ["~> 2.4.4"])

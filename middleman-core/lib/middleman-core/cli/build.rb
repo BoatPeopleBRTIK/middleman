@@ -1,5 +1,6 @@
 require 'fileutils'
 require 'set'
+require 'parallel'
 
 # CLI Module
 module Middleman::Cli
@@ -39,6 +40,10 @@ module Middleman::Cli
                   type: :boolean,
                   default: false,
                   desc: 'Generate profiling report for the build'
+    method_option :parallel,
+                  type: :boolean,
+                  default: true,
+                  desc: 'Output files in parallel (--no-parallel to disable)'
 
     # Core build Thor command
     # @return [void]
@@ -64,6 +69,7 @@ module Middleman::Cli
       opts = {}
       opts[:glob]  = options['glob'] if options.key?('glob')
       opts[:clean] = options['clean']
+      opts[:parallel] = options['parallel']
 
       self.class.shared_instance.run_hook :before_build, self
 
@@ -179,21 +185,29 @@ module Middleman::Cli
     # Actually build the app
     # @return [void]
     def execute!
-      # Sort order, images, fonts, js/css and finally everything else.
-      sort_order = %w(.png .jpeg .jpg .gif .bmp .svg .svgz .ico .webp .woff .woff2 .otf .ttf .eot .js .css)
+      prerender_css
+      output_files
+      ::Middleman::Profiling.report('build')
+    end
 
+    def prerender_css
       # Pre-request CSS to give Compass a chance to build sprites
       logger.debug '== Prerendering CSS'
 
-      @app.sitemap.resources.select do |resource|
-        resource.ext == '.css'
-      end.each(&method(:build_resource))
+      resources = @app.sitemap.resources.select { |r| r.ext == '.css' }
+
+      output_resources(resources)
 
       logger.debug '== Checking for Compass sprites'
 
       # Double-check for compass sprites
       @app.files.find_new_files((@source_dir + @app.images_dir).relative_path_from(@app.root_path))
       @app.sitemap.ensure_resource_list_updated!
+    end
+
+    def output_files
+      # Sort order, images, fonts, js/css and finally everything else.
+      sort_order = %w(.png .jpeg .jpg .gif .bmp .svg .svgz .ico .webp .woff .woff2 .otf .ttf .eot .js .css)
 
       # Sort paths to be built by the above order. This is primarily so Compass can
       # find files in the build folder when it needs to generate sprites for the
@@ -201,36 +215,43 @@ module Middleman::Cli
 
       logger.debug '== Building files'
 
-      resources = @app.sitemap.resources.sort_by do |r|
-        sort_order.index(r.ext) || 100
-      end
+      resources = @app.sitemap.resources.reject { |r| r.ext == '.css' }
+                                        .sort_by { |r| sort_order.index(r.ext) || 100 }
 
       if @build_dir.expand_path.relative_path_from(@source_dir).to_s =~ /\A[.\/]+\Z/
         raise ":build_dir (#{@build_dir}) cannot be a parent of :source_dir (#{@source_dir})"
       end
 
-      # Loop over all the paths and build them.
-      resources.reject do |resource|
-        resource.ext == '.css'
-      end.each(&method(:build_resource))
+      output_resources(resources)
+    end
 
-      ::Middleman::Profiling.report('build')
+    def output_resources(resources)
+      results = if @config[:parallel]
+        ::Parallel.map(resources, &method(:build_resource))
+      else
+        resources.map(&method(:build_resource))
+      end
+
+      return unless should_clean?
+
+      results.each do |output_file|
+        next unless output_file.exist?
+
+        # handle UTF-8-MAC filename on MacOS
+        cleaned_name = if RUBY_PLATFORM =~ /darwin/
+          output_file.realpath.to_s.encode('UTF-8', 'UTF-8-MAC')
+        else
+          output_file.realpath
+        end
+
+        @to_clean.delete(Pathname(cleaned_name))
+      end
     end
 
     def build_resource(resource)
       return if @config[:glob] && !File.fnmatch(@config[:glob], resource.destination_path)
 
-      output_path = render_to_file(resource)
-
-      return unless should_clean? && output_path.exist?
-
-      if RUBY_PLATFORM =~ /darwin/
-        # handle UTF-8-MAC filename on MacOS
-
-        @to_clean.delete(output_path.realpath.to_s.encode('UTF-8', 'UTF-8-MAC'))
-      else
-        @to_clean.delete(output_path.realpath)
-      end
+      output_file = render_to_file(resource)
     end
 
     # Render a resource to a file.
