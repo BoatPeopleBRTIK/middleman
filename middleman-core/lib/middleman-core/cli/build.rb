@@ -244,7 +244,7 @@ module Middleman::Cli
           output_file.realpath
         end
 
-        @to_clean.delete(Pathname(cleaned_name))
+        @to_clean.delete(cleaned_name)
       end
     end
 
